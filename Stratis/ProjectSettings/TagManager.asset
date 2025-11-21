@@ -4,8 +4,7 @@
 TagManager:
   serializedVersion: 3
   tags:
-  - BlueTeam
-  - RedTeam
+  - Enemy
   layers:
   - Default
   - TransparentFX
@@ -13,8 +12,8 @@ TagManager:
   - 
   - Water
   - UI
-  - Cover
-  - Agent
+  - Enemy
+  - 
   - 
   - 
   - 

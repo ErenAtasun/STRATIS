@@ -1,103 +1,102 @@
 using UnityEngine;
 using Unity.MLAgents;
-using Unity.MLAgents.Sensors;
 using Unity.MLAgents.Actuators;
-using UnityEngine.AI;
-using System.Linq;
+using Unity.MLAgents.Sensors;
 
 public class StratisAgent : Agent
 {
-    public Team team;
-    NavMeshAgent nav; PerceptionSystem per; WeaponSystem wep; HealthSystem hp;
-    bool inCover; Vector3 coverTarget;
+    [Header("Movement")]
+    public float moveSpeed = 5f;
+    public float rotateSpeed = 180f;
+    private Rigidbody rb;
 
-    void Awake()
+    public override void Initialize()
     {
-        nav = GetComponent<NavMeshAgent>();
-        per = GetComponent<PerceptionSystem>();
-        wep = GetComponent<WeaponSystem>();
-        hp = GetComponent<HealthSystem>(); hp.team = team;
+        rb = GetComponent<Rigidbody>();
+        if (rb == null)
+        {
+            rb = gameObject.AddComponent<Rigidbody>();
+        }
+
+        rb.freezeRotation = true; // Yalnızca yatay dönsün
     }
 
     public override void OnEpisodeBegin()
     {
-        inCover = false; coverTarget = Vector3.zero; hp.ResetHP(); nav.ResetPath();
+        // Şimdilik basit reset
+        rb.velocity = Vector3.zero;
+        rb.angularVelocity = Vector3.zero;
     }
 
     public override void CollectObservations(VectorSensor sensor)
     {
-        sensor.AddObservation((int)team);
-        sensor.AddObservation(hp.Health / hp.maxHealth);
-        sensor.AddObservation(inCover ? 1f : 0f);
+        // Demo için 6 gözlem dolduralım
+        // İleride bunları gerçek değerlerle değiştireceğiz
 
-        var enemies = per.GetEnemies(team, 2).ToList();
-        foreach (var e in enemies)
-        {
-            Vector3 to = e.position - transform.position;
-            sensor.AddObservation(Mathf.Clamp01(to.magnitude / 40f));
-            sensor.AddObservation(Vector3.SignedAngle(transform.forward, to.normalized, Vector3.up) / 180f);
-            sensor.AddObservation(per.enemyVisible && per.currentEnemy == e ? 1f : 0f);
-        }
-        for (int i = enemies.Count; i < 2; i++) sensor.AddObservation(new float[] { 0, 0, 0 });
+        // 1-3: düşman pozisyonu yerine 0
+        sensor.AddObservation(0f);
+        sensor.AddObservation(0f);
+        sensor.AddObservation(0f);
 
-        var ally = FindObjectsOfType<StratisAgent>().Where(a => a != this && a.team == team)
-                    .OrderBy(a => Vector3.Distance(a.transform.position, transform.position)).FirstOrDefault();
-        if (ally)
-        {
-            Vector3 toA = ally.transform.position - transform.position;
-            sensor.AddObservation(Mathf.Clamp01(toA.magnitude / 40f));
-            sensor.AddObservation(Vector3.SignedAngle(transform.forward, toA.normalized, Vector3.up) / 180f);
-        }
-        else sensor.AddObservation(new float[] { 0, 0 });
+        // 4: cover mesafesi
+        sensor.AddObservation(0f);
 
-        var covers = per.GetNearbyCovers(2);
-        foreach (var c in covers)
-        {
-            sensor.AddObservation(Mathf.Clamp01(Vector3.Distance(transform.position, c) / 30f));
-            sensor.AddObservation(0f);
-        }
-        for (int i = covers.Count; i < 2; i++) sensor.AddObservation(new float[] { 0, 0 });
+        // 5: health
+        sensor.AddObservation(1f);
+
+        // 6: ammo
+        sensor.AddObservation(1f);
     }
 
     public override void OnActionReceived(ActionBuffers actions)
     {
-        // Continuous: moveX, moveZ
-        var moveX = Mathf.Clamp(actions.ContinuousActions[0], -1f, 1f);
-        var moveZ = Mathf.Clamp(actions.ContinuousActions[1], -1f, 1f);
-        Vector3 dir = (transform.forward * moveZ + transform.right * moveX).normalized;
-        nav.Move(dir * 3.5f * Time.deltaTime);
+        var continuousActions = actions.ContinuousActions;
 
-        // Discrete: fire, takeCover
-        bool fire = actions.DiscreteActions[0] == 1;
-        bool takeCover = actions.DiscreteActions[1] == 1;
+        float moveX = Mathf.Clamp(continuousActions[0], -1f, 1f);
+        float moveZ = Mathf.Clamp(continuousActions[1], -1f, 1f);
+        float rotateY = Mathf.Clamp(continuousActions[2], -1f, 1f);
+        float shootSignal = Mathf.Clamp(continuousActions[3], -1f, 1f);
 
-        if (fire && per.enemyVisible && per.currentEnemy != null)
+        // Hareket
+        Vector3 moveDir = transform.right * moveX + transform.forward * moveZ;
+        Vector3 velocity = moveDir * moveSpeed;
+        rb.velocity = new Vector3(velocity.x, rb.velocity.y, velocity.z);
+
+        // Dönme
+        transform.Rotate(Vector3.up, rotateY * rotateSpeed * Time.fixedDeltaTime);
+
+        // Şimdilik shootSignal'i kullanmıyoruz, sadece log atalım
+        if (shootSignal > 0.5f)
         {
-            bool hit = wep.TryFire(per.currentEnemy, team);
-            if (hit) AddReward(+0.4f);
-        } // else if (fire) AddReward(-0.01f);
-
-        if (takeCover)
-        {
-            var cs = per.GetNearbyCovers(1);
-            if (cs.Count > 0)
-            {
-                coverTarget = cs[0];
-                nav.SetDestination(coverTarget);
-                float d = Vector3.Distance(transform.position, coverTarget);
-                AddReward(+0.02f * Mathf.Clamp01((15f - d) / 15f));
-            }
+            // Debug.Log("Shoot!");
         }
-
-        inCover = Physics.Raycast(transform.position + Vector3.up * 1.2f, -transform.forward, 1.0f, per.coverMask);
     }
 
     public override void Heuristic(in ActionBuffers actionsOut)
     {
-        var ca = actionsOut.ContinuousActions; var da = actionsOut.DiscreteActions;
-        ca[0] = Input.GetAxis("Horizontal");  // A/D
-        ca[1] = Input.GetAxis("Vertical");    // W/S
-        da[0] = Input.GetKey(KeyCode.Space) ? 1 : 0; // fire
-        da[1] = Input.GetKey(KeyCode.LeftControl) ? 1 : 0; // cover
+        var continuous = actionsOut.ContinuousActions;
+
+        float moveX = 0f;
+        float moveZ = 0f;
+        float rotateY = 0f;
+        float shoot = 0f;
+
+        // WASD
+        if (Input.GetKey(KeyCode.W)) moveZ = 1f;
+        if (Input.GetKey(KeyCode.S)) moveZ = -1f;
+        if (Input.GetKey(KeyCode.D)) moveX = 1f;
+        if (Input.GetKey(KeyCode.A)) moveX = -1f;
+
+        // Q / E ile dön
+        if (Input.GetKey(KeyCode.Q)) rotateY = -1f;
+        if (Input.GetKey(KeyCode.E)) rotateY = 1f;
+
+        // Space ile ateş sinyali
+        if (Input.GetKey(KeyCode.Space)) shoot = 1f;
+
+        continuous[0] = moveX;
+        continuous[1] = moveZ;
+        continuous[2] = rotateY;
+        continuous[3] = shoot;
     }
 }
