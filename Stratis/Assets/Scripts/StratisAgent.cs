@@ -10,21 +10,38 @@ public class StratisAgent : Agent
     public float rotateSpeed = 180f;
     private Rigidbody rb;
 
-    [Header("Combat")]
+    [Header("Combat / Raycast")]
     public Transform shootOrigin;
     public float shootRange = 20f;
     public LayerMask shootLayers;
-    public float hitReward = 1.0f;
-    public float missPenalty = -0.01f;
 
-    [Header("Environment References")]
+    [Header("Environment")]
     public Transform enemyTransform;
 
     [Header("Agent State")]
-    public float health = 100f;
     public float maxHealth = 100f;
-    public int ammo = 10;
-    public int maxAmmo = 10;
+    public float health = 100f;
+
+    [Header("Ammo / Reload")]
+    public int maxAmmo = 5;
+    public float reloadDuration = 3f;
+
+    private int currentAmmo;
+    private bool isReloading = false;
+    private float reloadTimer = 0f;
+
+    [Header("Bullet Visual")]
+    public GameObject bulletPrefab;
+    public float bulletSpeed = 20f;
+
+    [Header("Rewards")]
+    public float hitReward = 1f;
+    public float missPenalty = -0.01f;
+
+    [Header("FOV")]
+    public FOVVisualizer fovVisualizer;   // FOV script'i buraya atanacak
+
+    // ------------------------------
 
     public override void Initialize()
     {
@@ -34,7 +51,10 @@ public class StratisAgent : Agent
             rb = gameObject.AddComponent<Rigidbody>();
         }
 
-        rb.freezeRotation = true; // YalnÄ±zca yatay dÃ¶nsÃ¼n
+        rb.freezeRotation = true;
+
+        health = maxHealth;
+        currentAmmo = maxAmmo;
     }
 
     public override void OnEpisodeBegin()
@@ -43,23 +63,37 @@ public class StratisAgent : Agent
         rb.angularVelocity = Vector3.zero;
 
         health = maxHealth;
-        ammo = maxAmmo;
+        currentAmmo = maxAmmo;
+        isReloading = false;
+        reloadTimer = 0f;
 
-        // DÃ¼ÅŸmanÄ± rastgele bir yere koy
         if (enemyTransform != null)
         {
             Vector3 randomPos = new Vector3(
-                Random.Range(-8f, 8f),
-                0.5f,
-                Random.Range(2f, 10f)
+                Random.Range(-4f, 4f),
+                enemyTransform.position.y,
+                Random.Range(3f, 7f)
             );
             enemyTransform.position = randomPos;
         }
     }
 
+    private void Update()
+    {
+        // Reload sayacý
+        if (isReloading)
+        {
+            reloadTimer -= Time.deltaTime;
+            if (reloadTimer <= 0f)
+            {
+                FinishReload();
+            }
+        }
+    }
+
+
     public override void CollectObservations(VectorSensor sensor)
     {
-        // 1â€“3: dÃ¼ÅŸmana gÃ¶re lokal yÃ¶n + mesafe
         if (enemyTransform != null)
         {
             Vector3 toEnemy = enemyTransform.position - transform.position;
@@ -67,7 +101,7 @@ public class StratisAgent : Agent
 
             sensor.AddObservation(localEnemy.x);
             sensor.AddObservation(localEnemy.z);
-            sensor.AddObservation(toEnemy.magnitude / 20f); // normalize mesafe
+            sensor.AddObservation(toEnemy.magnitude / 20f);
         }
         else
         {
@@ -76,140 +110,135 @@ public class StratisAgent : Agent
             sensor.AddObservation(1f);
         }
 
-        // 4: health
         sensor.AddObservation(health / maxHealth);
-
-        // 5: ammo
-        sensor.AddObservation((float)ammo / maxAmmo);
-
-        // 6: dummy cover mesafesi yoksa ÅŸimdilik 0
-        sensor.AddObservation(0f);
+        sensor.AddObservation((float)currentAmmo / maxAmmo);
+        sensor.AddObservation(isReloading ? 1f : 0f);
     }
 
     public override void OnActionReceived(ActionBuffers actions)
     {
-        var continuousActions = actions.ContinuousActions;
+        var c = actions.ContinuousActions;
 
-        float moveX = Mathf.Clamp(continuousActions[0], -1f, 1f);
-        float moveZ = Mathf.Clamp(continuousActions[1], -1f, 1f);
-        float rotateY = Mathf.Clamp(continuousActions[2], -1f, 1f);
-        float shootSignal = Mathf.Clamp(continuousActions[3], -1f, 1f);
+        float moveX = Mathf.Clamp(c[0], -1f, 1f);
+        float moveZ = Mathf.Clamp(c[1], -1f, 1f);
+        float rotateY = Mathf.Clamp(c[2], -1f, 1f);
+        float shootSignal = Mathf.Clamp(c[3], -1f, 1f);
 
-        // Hareket
         Vector3 moveDir = transform.right * moveX + transform.forward * moveZ;
-        Vector3 velocity = moveDir * moveSpeed;
-        rb.velocity = new Vector3(velocity.x, rb.velocity.y, velocity.z);
+        Vector3 vel = moveDir * moveSpeed;
+        rb.velocity = new Vector3(vel.x, rb.velocity.y, vel.z);
 
-        // DÃ¶nme
         transform.Rotate(Vector3.up, rotateY * rotateSpeed * Time.fixedDeltaTime);
 
-        // AteÅŸ
         if (shootSignal > 0.5f)
-        {
             Shoot();
-        }
 
-        // KÃ¼Ã§Ã¼k step penalty
         AddReward(-0.0005f);
     }
-    private void Shoot()
-    {
-        if (ammo <= 0)
-        {
-            AddReward(-0.005f);
-            Debug.Log("Mermi yok!");
-            return;
-        }
-
-        ammo--;
-
-        Vector3 origin = shootOrigin != null ? shootOrigin.position : transform.position + Vector3.up * 0.5f;
-        Vector3 direction = transform.forward;
-
-        // SADECE SAHNEDE GÃ–RÃœNEN Ã‡Ä°ZGÄ° (Scene view, Game iÃ§inde deÄŸil)
-        Debug.DrawRay(origin, direction * shootRange, Color.red, 0.2f);
-
-        Ray ray = new Ray(origin, direction);
-
-        if (Physics.Raycast(ray, out RaycastHit hit, shootRange, shootLayers))
-        {
-            Debug.Log($"Raycast hit: {hit.collider.name}");
-
-            if (hit.collider.CompareTag("Enemy"))
-            {
-                Debug.Log("ENEMY VURULDU!");
-                AddReward(hitReward);
-
-                EnemyDummy dummy = hit.collider.GetComponent<EnemyDummy>();
-                if (dummy != null)
-                {
-                    dummy.OnHit();
-                }
-            }
-            else
-            {
-                Debug.Log("BaÅŸka bir objeye Ã§arptÄ±.");
-                AddReward(missPenalty);
-            }
-        }
-        else
-        {
-            Debug.Log("Raycast BOÅžA gitti.");
-            AddReward(missPenalty);
-        }
-    }
-
 
     public override void Heuristic(in ActionBuffers actionsOut)
     {
-        var continuous = actionsOut.ContinuousActions;
+        var c = actionsOut.ContinuousActions;
 
         float moveX = 0f;
         float moveZ = 0f;
         float rotateY = 0f;
         float shoot = 0f;
 
-        // WASD
         if (Input.GetKey(KeyCode.W)) moveZ = 1f;
         if (Input.GetKey(KeyCode.S)) moveZ = -1f;
         if (Input.GetKey(KeyCode.D)) moveX = 1f;
         if (Input.GetKey(KeyCode.A)) moveX = -1f;
 
-        // Q / E ile dÃ¶n
         if (Input.GetKey(KeyCode.Q)) rotateY = -1f;
         if (Input.GetKey(KeyCode.E)) rotateY = 1f;
 
-        // Space ile ateÅŸ sinyali
-        if (Input.GetKey(KeyCode.Space)) shoot = 1f;
+        // cooldown yok: Space'e bastýðýn anda mermi çýkar
+        if (Input.GetKeyDown(KeyCode.Space)) shoot = 1f;
 
-        continuous[0] = moveX;
-        continuous[1] = moveZ;
-        continuous[2] = rotateY;
-        continuous[3] = shoot;
+        c[0] = moveX;
+        c[1] = moveZ;
+        c[2] = rotateY;
+        c[3] = shoot;
     }
-    private void OnDrawGizmosSelected()
+
+    // ---------------- SHOOT ----------------
+
+    private void Shoot()
     {
-        // YalnÄ±zca Scene view'de agent seÃ§iliyken gÃ¶rÃ¼nÃ¼r
-        Gizmos.color = Color.yellow;
+        // Reload sýrasýnda ateþ yok
+        if (isReloading)
+            return;
 
-        float viewAngle = 45f;    // saÄŸ/sol aÃ§Ä±
-        float viewDistance = shootRange;
+        // Mermi yoksa reload baþlat
+        if (currentAmmo <= 0)
+        {
+            StartReload();
+            return;
+        }
 
-        Vector3 origin = shootOrigin != null ? shootOrigin.position : transform.position + Vector3.up * 0.5f;
-        Vector3 forward = transform.forward;
+        // Mermi düþür
+        currentAmmo--;
 
-        // Orta ray
-        Gizmos.DrawRay(origin, forward * viewDistance);
+        // Çýkýþ noktasý
+        Vector3 origin = shootOrigin != null
+            ? shootOrigin.position
+            : transform.position + Vector3.up * 0.5f;
 
-        // SaÄŸ ve sol sÄ±nÄ±r
-        Quaternion rightRot = Quaternion.AngleAxis(viewAngle, Vector3.up);
-        Quaternion leftRot = Quaternion.AngleAxis(-viewAngle, Vector3.up);
+        // Varsayýlan yön: ajan nereye bakýyorsa orasý
+        Vector3 direction = transform.forward;
 
-        Vector3 rightDir = rightRot * forward;
-        Vector3 leftDir = leftRot * forward;
+        // Eðer enemy varsa ve FOV içindeyse, yönü enemy'e çevir
+        float allowedAngle = 60f;
+        if (fovVisualizer != null)
+            allowedAngle = fovVisualizer.viewAngle;
 
-        Gizmos.DrawRay(origin, rightDir * viewDistance);
-        Gizmos.DrawRay(origin, leftDir * viewDistance);
+        if (enemyTransform != null)
+        {
+            Vector3 toEnemy = (enemyTransform.position + Vector3.up * 0.5f) - origin;
+            float angle = Vector3.Angle(transform.forward, toEnemy);
+
+            if (angle <= allowedAngle)
+            {
+                direction = toEnemy.normalized;
+            }
+        }
+
+        // ---- SADECE GÖRSEL MERMÝ SPAWN ----
+        if (bulletPrefab != null)
+        {
+            Quaternion rot = Quaternion.LookRotation(direction, Vector3.up);
+            GameObject b = Instantiate(bulletPrefab, origin, rot);
+
+            Bullet bullet = b.GetComponent<Bullet>();
+            if (bullet != null)
+            {
+                bullet.Init(this, direction, bulletSpeed);
+            }
+        }
+
+        // Mermi bittiyse reload
+        if (currentAmmo <= 0)
+        {
+            StartReload();
+        }
     }
 
+    private void StartReload()
+    {
+        isReloading = true;
+        reloadTimer = reloadDuration;
+    }
+
+    private void FinishReload()
+    {
+        isReloading = false;
+        currentAmmo = maxAmmo;
+    }
+
+    // ------ UI GETTERS ------
+
+    public int GetCurrentAmmo() => currentAmmo;
+    public bool IsReloading() => isReloading;
+    public float GetReloadRemainingTime() => reloadTimer;
 }
