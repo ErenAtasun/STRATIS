@@ -10,6 +10,22 @@ public class StratisAgent : Agent
     public float rotateSpeed = 180f;
     private Rigidbody rb;
 
+    [Header("Combat")]
+    public Transform shootOrigin;
+    public float shootRange = 20f;
+    public LayerMask shootLayers;
+    public float hitReward = 1.0f;
+    public float missPenalty = -0.01f;
+
+    [Header("Environment References")]
+    public Transform enemyTransform;
+
+    [Header("Agent State")]
+    public float health = 100f;
+    public float maxHealth = 100f;
+    public int ammo = 10;
+    public int maxAmmo = 10;
+
     public override void Initialize()
     {
         rb = GetComponent<Rigidbody>();
@@ -23,29 +39,51 @@ public class StratisAgent : Agent
 
     public override void OnEpisodeBegin()
     {
-        // Şimdilik basit reset
         rb.velocity = Vector3.zero;
         rb.angularVelocity = Vector3.zero;
+
+        health = maxHealth;
+        ammo = maxAmmo;
+
+        // Düşmanı rastgele bir yere koy
+        if (enemyTransform != null)
+        {
+            Vector3 randomPos = new Vector3(
+                Random.Range(-8f, 8f),
+                0.5f,
+                Random.Range(2f, 10f)
+            );
+            enemyTransform.position = randomPos;
+        }
     }
 
     public override void CollectObservations(VectorSensor sensor)
     {
-        // Demo için 6 gözlem dolduralım
-        // İleride bunları gerçek değerlerle değiştireceğiz
+        // 1–3: düşmana göre lokal yön + mesafe
+        if (enemyTransform != null)
+        {
+            Vector3 toEnemy = enemyTransform.position - transform.position;
+            Vector3 localEnemy = transform.InverseTransformDirection(toEnemy.normalized);
 
-        // 1-3: düşman pozisyonu yerine 0
-        sensor.AddObservation(0f);
-        sensor.AddObservation(0f);
-        sensor.AddObservation(0f);
+            sensor.AddObservation(localEnemy.x);
+            sensor.AddObservation(localEnemy.z);
+            sensor.AddObservation(toEnemy.magnitude / 20f); // normalize mesafe
+        }
+        else
+        {
+            sensor.AddObservation(0f);
+            sensor.AddObservation(0f);
+            sensor.AddObservation(1f);
+        }
 
-        // 4: cover mesafesi
+        // 4: health
+        sensor.AddObservation(health / maxHealth);
+
+        // 5: ammo
+        sensor.AddObservation((float)ammo / maxAmmo);
+
+        // 6: dummy cover mesafesi yoksa şimdilik 0
         sensor.AddObservation(0f);
-
-        // 5: health
-        sensor.AddObservation(1f);
-
-        // 6: ammo
-        sensor.AddObservation(1f);
     }
 
     public override void OnActionReceived(ActionBuffers actions)
@@ -65,12 +103,62 @@ public class StratisAgent : Agent
         // Dönme
         transform.Rotate(Vector3.up, rotateY * rotateSpeed * Time.fixedDeltaTime);
 
-        // Şimdilik shootSignal'i kullanmıyoruz, sadece log atalım
+        // Ateş
         if (shootSignal > 0.5f)
         {
-            // Debug.Log("Shoot!");
+            Shoot();
+        }
+
+        // Küçük step penalty
+        AddReward(-0.0005f);
+    }
+    private void Shoot()
+    {
+        if (ammo <= 0)
+        {
+            AddReward(-0.005f);
+            Debug.Log("Mermi yok!");
+            return;
+        }
+
+        ammo--;
+
+        Vector3 origin = shootOrigin != null ? shootOrigin.position : transform.position + Vector3.up * 0.5f;
+        Vector3 direction = transform.forward;
+
+        // SADECE SAHNEDE GÖRÜNEN ÇİZGİ (Scene view, Game içinde değil)
+        Debug.DrawRay(origin, direction * shootRange, Color.red, 0.2f);
+
+        Ray ray = new Ray(origin, direction);
+
+        if (Physics.Raycast(ray, out RaycastHit hit, shootRange, shootLayers))
+        {
+            Debug.Log($"Raycast hit: {hit.collider.name}");
+
+            if (hit.collider.CompareTag("Enemy"))
+            {
+                Debug.Log("ENEMY VURULDU!");
+                AddReward(hitReward);
+
+                EnemyDummy dummy = hit.collider.GetComponent<EnemyDummy>();
+                if (dummy != null)
+                {
+                    dummy.OnHit();
+                }
+            }
+            else
+            {
+                Debug.Log("Başka bir objeye çarptı.");
+                AddReward(missPenalty);
+            }
+        }
+        else
+        {
+            Debug.Log("Raycast BOŞA gitti.");
+            AddReward(missPenalty);
         }
     }
+
 
     public override void Heuristic(in ActionBuffers actionsOut)
     {
@@ -99,4 +187,29 @@ public class StratisAgent : Agent
         continuous[2] = rotateY;
         continuous[3] = shoot;
     }
+    private void OnDrawGizmosSelected()
+    {
+        // Yalnızca Scene view'de agent seçiliyken görünür
+        Gizmos.color = Color.yellow;
+
+        float viewAngle = 45f;    // sağ/sol açı
+        float viewDistance = shootRange;
+
+        Vector3 origin = shootOrigin != null ? shootOrigin.position : transform.position + Vector3.up * 0.5f;
+        Vector3 forward = transform.forward;
+
+        // Orta ray
+        Gizmos.DrawRay(origin, forward * viewDistance);
+
+        // Sağ ve sol sınır
+        Quaternion rightRot = Quaternion.AngleAxis(viewAngle, Vector3.up);
+        Quaternion leftRot = Quaternion.AngleAxis(-viewAngle, Vector3.up);
+
+        Vector3 rightDir = rightRot * forward;
+        Vector3 leftDir = leftRot * forward;
+
+        Gizmos.DrawRay(origin, rightDir * viewDistance);
+        Gizmos.DrawRay(origin, leftDir * viewDistance);
+    }
+
 }
